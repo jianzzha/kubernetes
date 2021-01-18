@@ -82,6 +82,7 @@ import (
 	kubeletcertificate "k8s.io/kubernetes/pkg/kubelet/certificate"
 	"k8s.io/kubernetes/pkg/kubelet/certificate/bootstrap"
 	"k8s.io/kubernetes/pkg/kubelet/cm"
+	"k8s.io/kubernetes/pkg/kubelet/cm/cpumanager/topology"
 	"k8s.io/kubernetes/pkg/kubelet/cm/cpuset"
 	"k8s.io/kubernetes/pkg/kubelet/config"
 	kubecontainer "k8s.io/kubernetes/pkg/kubelet/container"
@@ -647,31 +648,36 @@ func run(ctx context.Context, s *options.KubeletServer, kubeDeps *kubelet.Depend
 		}
 
 		var reservedSystemCPUs cpuset.CPUSet
+		var useEmptyCPUSet bool
 		if s.ReservedSystemCPUs != "" {
+			useEmptyCPUSet = false
 			// is it safe do use CAdvisor here ??
 			machineInfo, err := kubeDeps.CAdvisorInterface.MachineInfo()
 			if err != nil {
 				// if can't use CAdvisor here, fall back to non-explicit cpu list behavor
 				klog.Warning("Failed to get MachineInfo, set reservedSystemCPUs to empty")
-				reservedSystemCPUs = cpuset.NewCPUSet()
-			} else {
-				var errParse error
-				reservedSystemCPUs, errParse = cpuset.Parse(s.ReservedSystemCPUs)
-				if errParse != nil {
-					// invalid cpu list is provided, set reservedSystemCPUs to empty, so it won't overwrite kubeReserved/systemReserved
-					klog.Infof("Invalid ReservedSystemCPUs \"%s\"", s.ReservedSystemCPUs)
-					return errParse
-				}
-				reservedList := reservedSystemCPUs.ToSlice()
-				first := reservedList[0]
-				last := reservedList[len(reservedList)-1]
-				if first < 0 || last >= machineInfo.NumCores {
-					// the specified cpuset is outside of the range of what the machine has
-					klog.Infof("Invalid cpuset specified by --reserved-cpus")
-					return fmt.Errorf("Invalid cpuset %q specified by --reserved-cpus", s.ReservedSystemCPUs)
-				}
+				useEmptyCPUSet = true
+			}
+			topo, err := topology.Discover(machineInfo)
+			if err != nil {
+				klog.Warning("Unable to discover cpu toplogy info, set reservedSystemCPUs to empty")
+				useEmptyCPUSet = true
+			}
+			reservedSystemCPUs, err = cpuset.Parse(s.ReservedSystemCPUs)
+			if err != nil {
+				klog.Warning("Unable to parse reserved-cpus, set reservedSystemCPUs to empty")
+				useEmptyCPUSet = true
+			}
+			allCPUs := topo.CPUDetails.CPUs()
+			klog.Infof("Online CPU list: %s", allCPUs.String())
+			if !reservedSystemCPUs.IsSubsetOf(allCPUs) {
+				klog.Warning("Invalid reserved-cpus list, set reservedSystemCPUs to empty")
+				useEmptyCPUSet = true
 			}
 		} else {
+			useEmptyCPUSet = true
+		}
+		if useEmptyCPUSet {
 			reservedSystemCPUs = cpuset.NewCPUSet()
 		}
 
